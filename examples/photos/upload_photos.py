@@ -1,3 +1,5 @@
+#!/usr/bin/python
+# - * - coding: utf-8 - * -
 from __future__ import unicode_literals
 
 import argparse
@@ -16,6 +18,8 @@ parser.add_argument("-p", type=str, help="password")
 parser.add_argument("-proxy", type=str, help="proxy")
 parser.add_argument("-photo", type=str, help="photo name")
 parser.add_argument("-caption", type=str, help="caption for photo")
+parser.add_argument('-tag', action='append', help='taged user id')
+
 args = parser.parse_args()
 
 bot = Bot()
@@ -64,20 +68,25 @@ try:
             else:
                 try:
                     caption = raw_input(
-                        "No caption found for this media. Type the caption now: "
+                        "No caption found for this media. " "Type the caption now: "
                     )
                 except NameError:
                     caption = input(
-                        "No caption found for this media. Type the caption now: "
+                        "No caption found for this media. " "Type the caption now: "
                     )
         bot.logger.info(
             "Uploading pic `{pic}` with caption: `{caption}`".format(
                 pic=pic, caption=caption
             )
         )
+
+        # prepare tagged user_id
+        users_to_tag = [{'user_id': u, 'x': 0.5, 'y': 0.5} for u in args.tag]
+
         if not bot.upload_photo(
             os.path.dirname(os.path.realpath(__file__)) + "/media/" + pic,
             caption=caption,
+            user_tags=users_to_tag
         ):
             bot.logger.error("Something went wrong...")
             break

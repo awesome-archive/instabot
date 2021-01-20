@@ -9,13 +9,17 @@ import random
 import sys
 import time
 import uuid
-
+import secrets
 import pytz
 import requests
 import requests.utils
 import six.moves.urllib as urllib
+
 from requests_toolbelt import MultipartEncoder
 from tqdm import tqdm
+from Crypto.PublicKey import RSA
+import rsa
+from Cryptodome.Cipher import AES
 
 from . import config, devices
 from .api_login import (
@@ -27,14 +31,21 @@ from .api_login import (
     reinstall_app_simulation,
     save_uuid_and_cookie,
     set_device,
-    sync_device_features,
     sync_launcher,
-    sync_user_features,
+    get_prefill_candidates,
+    get_account_family,
+    get_zr_token_result,
+    banyan,
+    igtv_browse_feed,
+    sync_device_features,
+    creatives_ar_class,
+    set_contact_point_prefill,
 )
-from .api_photo import configure_photo, download_photo, upload_photo
+from .api_photo import configure_photo, download_photo, upload_photo, upload_album
 from .api_story import configure_story, download_story, upload_story_photo
 from .api_video import configure_video, download_video, upload_video
 from .prepare import delete_credentials, get_credentials
+
 
 try:
     from json.decoder import JSONDecodeError
@@ -42,11 +53,26 @@ except ImportError:
     JSONDecodeError = ValueError
 
 
-PY2 = sys.version_info[0] == 2
+version_info = sys.version_info[0:3]
+is_py2 = version_info[0] == 2
+is_py3 = version_info[0] == 3
+is_py37 = version_info[:2] == (3, 7)
+
+
+version = "0.117.0"
+current_path = os.path.abspath(os.getcwd())
 
 
 class API(object):
-    def __init__(self, device=None, base_path="", save_logfile=True, log_filename=None):
+    def __init__(
+        self,
+        device=None,
+        base_path=current_path + "/config/",
+        save_logfile=True,
+        log_filename=None,
+        loglevel_file=logging.DEBUG,
+        loglevel_stream=logging.INFO,
+    ):
         # Setup device and user_agent
         self.device = device or devices.DEFAULT_DEVICE
 
@@ -60,28 +86,49 @@ class API(object):
         self.total_requests = 0
 
         # Setup logging
-        self.logger = logging.getLogger("[instabot_{}]".format(id(self)))
+        # instabot_version = Bot.version()
+        # self.logger = logging.getLogger("[instabot_{}]".format(instabot_version))
+        self.logger = logging.getLogger("instabot version: " + version)
 
-        if not os.path.exists("./config/"):
-            os.makedirs("./config/")  # create base_path if not exists
+        if not os.path.exists(base_path):
+            os.makedirs(base_path)  # create base_path if not exists
+
+        if not os.path.exists(base_path + "/log/"):
+            os.makedirs(base_path + "/log/")  # create log folder if not exists
 
         if save_logfile is True:
             if log_filename is None:
                 log_filename = os.path.join(
-                    base_path, "instabot_{}.log".format(id(self))
+                    base_path, "log/instabot_{}.log".format(id(self))
                 )
 
             fh = logging.FileHandler(filename=log_filename)
-            fh.setLevel(logging.INFO)
-            fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            fh.setLevel(loglevel_file)
+            fh.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(name)s (%(module)s %(pathname)s:%(lineno)s) - %(levelname)s - %(message)s"
+                )
+            )
 
-            self.logger.addHandler(fh)
+            handler_existed = False
+            for handler in self.logger.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    handler_existed = True
+                    break
+            if not handler_existed:
+                self.logger.addHandler(fh)
 
         ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
+        ch.setLevel(loglevel_stream)
         ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 
-        self.logger.addHandler(ch)
+        handler_existed = False
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.StreamHandler):
+                handler_existed = True
+                break
+        if not handler_existed:
+            self.logger.addHandler(ch)
         self.logger.setLevel(logging.DEBUG)
 
         self.last_json = None
@@ -90,24 +137,11 @@ class API(object):
         self.username = username
         self.password = password
 
-        self.logger = logging.getLogger("[instabot_{}]".format(self.username))
-
         if set_device is True:
             self.set_device()
 
         if generate_all_uuids is True:
             self.generate_all_uuids()
-
-    def set_contact_point_prefill(self, usage="prefill"):
-        data = json.dumps(
-            {
-                "id": self.uuid,
-                "phone_id": self.phone_id,
-                "_csrftoken": self.token,
-                "usage": usage,
-            }
-        )
-        return self.send_request("accounts/contact_point_prefill/", data, login=True)
 
     def get_suggested_searches(self, _type="users"):
         return self.send_request(
@@ -128,14 +162,32 @@ class API(object):
         return self.send_request("attribution/log_attribution/", data, login=True)
 
     # ====== ALL METHODS IMPORT FROM api_login ====== #
-    def sync_device_features(self, login=False):
+    def sync_device_features(self, login=None):
         return sync_device_features(self, login)
 
-    def sync_launcher(self, login=False):
+    def sync_launcher(self, login=None):
         return sync_launcher(self, login)
 
-    def sync_user_features(self):
-        return sync_user_features(self)
+    def set_contact_point_prefill(self, usage=None, login=False):
+        return set_contact_point_prefill(self, usage, login)
+
+    def igtv_browse_feed(self):
+        return igtv_browse_feed(self)
+
+    def creatives_ar_class(self):
+        return creatives_ar_class(self)
+
+    def get_prefill_candidates(self, login=False):
+        return get_prefill_candidates(self, login)
+
+    def get_account_family(self):
+        return get_account_family(self)
+
+    def get_zr_token_result(self):
+        return get_zr_token_result(self)
+
+    def banyan(self):
+        return banyan(self)
 
     def pre_login_flow(self):
         return pre_login_flow(self)
@@ -161,6 +213,40 @@ class API(object):
     def save_uuid_and_cookie(self):
         return save_uuid_and_cookie(self)
 
+    def encrypt_password(self, password):
+        IG_LOGIN_ANDROID_PUBLIC_KEY = "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF1enRZOEZvUlRGRU9mK1RkTGlUdAplN3FIQXY1cmdBMmk5RkQ0YjgzZk1GK3hheW14b0xSdU5KTitRanJ3dnBuSm1LQ0QxNGd3K2w3TGQ0RHkvRHVFCkRiZlpKcmRRWkJIT3drS3RqdDdkNWlhZFdOSjdLczlBM0NNbzB5UktyZFBGU1dsS21lQVJsTlFrVXF0YkNmTzcKT2phY3ZYV2dJcGlqTkdJRVk4UkdzRWJWZmdxSmsrZzhuQWZiT0xjNmEwbTMxckJWZUJ6Z0hkYWExeFNKOGJHcQplbG4zbWh4WDU2cmpTOG5LZGk4MzRZSlNaV3VxUHZmWWUrbEV6Nk5laU1FMEo3dE80eWxmeWlPQ05ycnF3SnJnCjBXWTFEeDd4MHlZajdrN1NkUWVLVUVaZ3FjNUFuVitjNUQ2SjJTSTlGMnNoZWxGNWVvZjJOYkl2TmFNakpSRDgKb1FJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
+        IG_LOGIN_ANDROID_PUBLIC_KEY_ID = 205
+
+        key = secrets.token_bytes(32)
+        iv = secrets.token_bytes(12)
+        time = str(int(datetime.datetime.now().timestamp()))
+
+        base64_decoded_device_public_key = base64.b64decode(
+            IG_LOGIN_ANDROID_PUBLIC_KEY.encode()
+        )
+
+        public_key = RSA.importKey(base64_decoded_device_public_key)
+
+        encrypted_aes_key = rsa.encrypt(key, public_key)
+
+        cipher = AES.new(key, AES.MODE_GCM, iv)
+        cipher.update(time.encode())
+        encrypted_password, tag = cipher.encrypt_and_digest(password.encode())
+
+        payload = (
+            b"\x01"
+            + str(IG_LOGIN_ANDROID_PUBLIC_KEY_ID).encode()
+            + iv
+            + b"0001"
+            + encrypted_aes_key
+            + tag
+            + encrypted_password
+        )
+
+        base64_encoded_payload = base64.b64encode(payload)
+
+        return f"#PWD_INSTAGRAM:4:{time}:{base64_encoded_payload.decode()}"
+
     def login(
         self,
         username=None,
@@ -176,7 +262,9 @@ class API(object):
         is_threaded=False,
     ):
         if password is None:
-            username, password = get_credentials(username=username)
+            username, password = get_credentials(
+                base_path=self.base_path, username=username
+            )
 
         set_device = generate_all_uuids = True
         self.set_user(username, password)
@@ -187,10 +275,12 @@ class API(object):
 
         self.cookie_fname = cookie_fname
         if self.cookie_fname is None:
-            cookie_fname = "{username}_uuid_and_cookie.json".format(username=username)
+            fmt = "{username}_uuid_and_cookie.json"
+            cookie_fname = fmt.format(username=username)
             self.cookie_fname = os.path.join(self.base_path, cookie_fname)
 
         cookie_is_loaded = False
+        msg = "Login flow failed, the cookie is broken. Relogin again."
 
         if use_cookie is True:
             # try:
@@ -198,17 +288,14 @@ class API(object):
                 self.load_uuid_and_cookie(load_cookie=use_cookie, load_uuid=use_uuid)
                 is True
             ):
-                if (
-                    self.login_flow(False) is True
-                ):  # Check if the token loaded is valid.
+                # Check if the token loaded is valid.
+                if self.login_flow(False) is True:
                     cookie_is_loaded = True
                     self.save_successful_login()
                 else:
-                    self.logger.info("Login flow failed, the cookie is broken. Relogin again.")
+                    self.logger.info(msg)
                     set_device = generate_all_uuids = False
                     force = True
-            # except Exception:
-            #     print("The cookie is not found, but don't worry `instabot` will create it for you using your login details.")
 
         if not cookie_is_loaded and (not self.is_logged_in or force):
             self.session = requests.Session()
@@ -223,29 +310,34 @@ class API(object):
                         self.set_device()
                     if generate_all_uuids is True:
                         self.generate_all_uuids()
-
             self.pre_login_flow()
             data = json.dumps(
                 {
+                    "jazoest": str(random.randint(22000, 22999)),
+                    "country_codes": '[{"country_code":"1","source":["default"]}]',
                     "phone_id": self.phone_id,
                     "_csrftoken": self.token,
                     "username": self.username,
+                    "adid": "",
                     "guid": self.uuid,
                     "device_id": self.device_id,
+                    "google_tokens": "[]",
                     "password": self.password,
-                    "login_attempt_count": "0",
+                    # "enc_password": self.encrypt_password(self.password),
+                    # "enc_password:" "#PWD_INSTAGRAM:4:TIME:ENCRYPTED_PASSWORD"
+                    "login_attempt_count": "1",
                 }
             )
 
             if self.send_request("accounts/login/", data, True):
                 self.save_successful_login()
                 self.login_flow(True)
-                # self.device_id = self.uuid
                 return True
+
             elif (
                 self.last_json.get("error_type", "") == "checkpoint_challenge_required"
             ):
-                self.logger.info("Checkpoint challenge required...")
+                # self.logger.info("Checkpoint challenge required...")
                 if ask_for_code is True:
                     solved = self.solve_challenge()
                     if solved:
@@ -253,13 +345,69 @@ class API(object):
                         self.login_flow(True)
                         return True
                     else:
+                        self.logger.error(
+                            "Failed to login, unable to solve the challenge"
+                        )
                         self.save_failed_login()
                         return False
                 else:
                     return False
+            elif self.last_json.get("two_factor_required"):
+                if self.two_factor_auth():
+                    self.save_successful_login()
+                    self.login_flow(True)
+                    return True
+                else:
+                    self.logger.error("Failed to login with 2FA!")
+                    self.save_failed_login()
+                    return False
             else:
+                self.logger.error(
+                    "Failed to login go to instagram and change your password"
+                )
                 self.save_failed_login()
+                delete_credentials(self.base_path)
                 return False
+
+    def two_factor_auth(self):
+        self.logger.info("Two-factor authentication required")
+        two_factor_code = input("Enter 2FA verification code: ")
+        two_factor_id = self.last_json["two_factor_info"]["two_factor_identifier"]
+
+        login = self.session.post(
+            config.API_URL + "accounts/two_factor_login/",
+            data={
+                "username": self.username,
+                "verification_code": two_factor_code,
+                "two_factor_identifier": two_factor_id,
+                "password": self.password,
+                "device_id": self.device_id,
+                "ig_sig_key_version": config.SIG_KEY_VERSION,
+            },
+            allow_redirects=True,
+        )
+
+        if login.status_code == 200:
+            resp_json = json.loads(login.text)
+            if resp_json["status"] != "ok":
+                if "message" in resp_json:
+                    self.logger.error("Login error: {}".format(resp_json["message"]))
+                else:
+                    self.logger.error(
+                        ('Login error: "{}" status and' " message {}.").format(
+                            resp_json["status"], login.text
+                        )
+                    )
+                return False
+            return True
+        else:
+            self.logger.error(
+                (
+                    "Two-factor authentication request returns "
+                    "{} error with message {} !"
+                ).format(login.status_code, login.text)
+            )
+            return False
 
     def save_successful_login(self):
         self.is_logged_in = True
@@ -268,7 +416,8 @@ class API(object):
 
     def save_failed_login(self):
         self.logger.info("Username or password is incorrect.")
-        delete_credentials()
+        delete_credentials(self.base_path)
+        sys.exit()
 
     def solve_challenge(self):
         challenge_url = self.last_json["challenge"]["api_path"][1:]
@@ -291,7 +440,7 @@ class API(object):
             return False
 
         print("A code has been sent to the method selected, please check.")
-        code = input("Insert code: ")
+        code = input("Insert code: ").replace(" ", "")
 
         data = json.dumps({"security_code": code})
         try:
@@ -346,13 +495,13 @@ class API(object):
         return not self.is_logged_in
 
     def set_proxy(self):
-        if self.proxy:
+        if getattr(self, "proxy", None):
             parsed = urllib.parse.urlparse(self.proxy)
             scheme = "http://" if not parsed.scheme else ""
             self.session.proxies["http"] = scheme + self.proxy
             self.session.proxies["https"] = scheme + self.proxy
 
-    def send_request(  # noqa: C901
+    def send_request(
         self,
         endpoint,
         post=None,
@@ -360,24 +509,20 @@ class API(object):
         with_signature=True,
         headers=None,
         extra_sig=None,
+        timeout_minutes=None,
     ):
+        self.set_proxy()  # Only happens if `self.proxy`
+        # TODO: fix the request_headers
+        self.session.headers.update(config.REQUEST_HEADERS)
+        self.session.headers.update({"User-Agent": self.user_agent})
+        # print("printing headers", self.session.headers)
         if not self.is_logged_in and not login:
             msg = "Not logged in!"
             self.logger.critical(msg)
             raise Exception(msg)
-
-        self.session.headers.update(config.REQUEST_HEADERS)
-        self.session.headers.update(
-            {
-                "User-Agent": self.user_agent,
-                "X-IG-Connection-Speed": "-1kbps",
-                "X-IG-Bandwidth-Speed-KBPS": str(random.randint(7000, 10000)),
-                "X-IG-Bandwidth-TotalBytes-B": str(random.randint(500000, 900000)),
-                "X-IG-Bandwidth-TotalTime-MS": str(random.randint(50, 150)),
-            }
-        )
         if headers:
             self.session.headers.update(headers)
+
         try:
             self.total_requests += 1
             if post is not None:  # POST
@@ -387,14 +532,25 @@ class API(object):
                     )  # Only `send_direct_item` doesn't need a signature
                     if extra_sig is not None and extra_sig != []:
                         post += "&".join(extra_sig)
+                # time.sleep(random.randint(1, 2))
                 response = self.session.post(config.API_URL + endpoint, data=post)
             else:  # GET
+                # time.sleep(random.randint(1, 2))
                 response = self.session.get(config.API_URL + endpoint)
         except Exception as e:
             self.logger.warning(str(e))
             return False
 
         self.last_response = response
+        if post is not None:
+            self.logger.debug(
+                "POST to endpoint: {} returned response: {}".format(endpoint, response)
+            )
+        else:
+            self.logger.debug(
+                "GET to endpoint: {} returned response: {}".format(endpoint, response)
+            )
+
         if response.status_code == 200:
             try:
                 self.last_json = json.loads(response.text)
@@ -402,77 +558,86 @@ class API(object):
             except JSONDecodeError:
                 return False
         else:
-            # print(endpoint, post, response.content)
+            self.logger.debug(
+                "Responsecode indicates error; response content: {}".format(
+                    response.content
+                )
+            )
             if response.status_code != 404 and response.status_code != "404":
                 self.logger.error(
                     "Request returns {} error!".format(response.status_code)
                 )
             try:
                 response_data = json.loads(response.text)
-                if "feedback_required" in str(response_data.get("message")):
+                if response_data.get(
+                    "message"
+                ) is not None and "feedback_required" in str(
+                    response_data.get("message").encode("utf-8")
+                ):
                     self.logger.error(
                         "ATTENTION!: `feedback_required`"
-                        + str(response_data.get("feedback_message"))
+                        + str(response_data.get("feedback_message").encode("utf-8"))
                     )
+                    try:
+                        self.last_response = response
+                        self.last_json = json.loads(response.text)
+                    except Exception:
+                        pass
                     return "feedback_required"
             except ValueError:
                 self.logger.error(
-                    "Error checking for `feedback_required`, response text is not JSON"
+                    "Error checking for `feedback_required`, "
+                    "response text is not JSON"
                 )
-
+                self.logger.info("Full Response: {}".format(str(response)))
+                try:
+                    self.logger.info("Response Text: {}".format(str(response.text)))
+                except Exception:
+                    pass
             if response.status_code == 429:
-                sleep_minutes = 5
+                # if we come to this error, add 5 minutes of sleep everytime we hit the 429 error (aka soft bann) keep increasing untill we are unbanned
+                if timeout_minutes is None:
+                    timeout_minutes = 0
+                if timeout_minutes == 15:
+                    # If we have been waiting for more than 15 minutes, lets restart.
+                    time.sleep(1)
+                    self.logger.error(
+                        "Since we hit 15 minutes of time outs, we have to restart. Removing session and cookies. Please relogin."
+                    )
+                    delete_credentials(self.base_path)
+                    sys.exit()
+                timeout_minutes += 5
                 self.logger.warning(
                     "That means 'too many requests'. I'll go to sleep "
-                    "for {} minutes.".format(sleep_minutes)
+                    "for {} minutes.".format(timeout_minutes)
                 )
-                time.sleep(sleep_minutes * 60)
-            elif response.status_code == 400:
+                time.sleep(timeout_minutes * 60)
+                return self.send_request(
+                    endpoint,
+                    post,
+                    login,
+                    with_signature,
+                    headers,
+                    extra_sig,
+                    timeout_minutes,
+                )
+            if response.status_code == 400:
                 response_data = json.loads(response.text)
-
+                if response_data.get("challenge_required"):
+                    # Try and fix the challenge required error by totally restarting
+                    self.logger.error(
+                        "Failed to login go to instagram and change your password"
+                    )
+                    delete_credentials(self.base_path)
                 # PERFORM Interactive Two-Factor Authentication
                 if response_data.get("two_factor_required"):
-                    self.logger.info("Two-factor authentication required")
-                    two_factor_code = input("Enter 2FA verification code: ")
-                    two_factor_id = response_data["two_factor_info"][
-                        "two_factor_identifier"
-                    ]
-
-                    login = self.session.post(
-                        config.API_URL + "accounts/two_factor_login/",
-                        data={
-                            "username": self.username,
-                            "verification_code": two_factor_code,
-                            "two_factor_identifier": two_factor_id,
-                            "password": self.password,
-                            "device_id": self.device_id,
-                            "ig_sig_key_version": 4,
-                        },
-                        allow_redirects=True,
-                    )
-
-                    if login.status_code == 200:
-                        resp_json = json.loads(login.text)
-                        if resp_json["status"] != "ok":
-                            if "message" in resp_json:
-                                self.logger.error(
-                                    "Login error: {}".format(resp_json["message"])
-                                )
-                            else:
-                                self.logger.error(
-                                    'Login error: "{}" status and message {}.'.format(
-                                        resp_json["status"], login.text
-                                    )
-                                )
-                            return False
-                        return True
-                    else:
-                        self.logger.error(
-                            "Two-factor authentication request returns {} error with message {} !".format(
-                                login.status_code, login.text
-                            )
-                        )
-                        return False
+                    try:
+                        self.last_response = response
+                        self.last_json = json.loads(response.text)
+                    except Exception:
+                        self.logger.error("Error unknown send request 400 2FA")
+                        pass
+                    return self.two_factor_auth()
                 # End of Interactive Two-Factor Authentication
                 else:
                     msg = "Instagram's error message: {}"
@@ -486,6 +651,7 @@ class API(object):
                 self.last_response = response
                 self.last_json = json.loads(response.text)
             except Exception:
+                self.logger.error("Error unknown send request")
                 pass
             return False
 
@@ -500,6 +666,18 @@ class API(object):
     @property
     def user_id(self):
         return self.cookie_dict["ds_user_id"]
+
+    @property
+    def mid(self):
+        return self.cookie_dict["mid"]
+
+    @property
+    def sessionid(self):
+        return self.cookie_dict["sessionid"]
+
+    @property
+    def views(self):
+        return self.cookie_dict["views"]
 
     @property
     def rank_token(self):
@@ -526,31 +704,41 @@ class API(object):
 
     def batch_fetch(self):
         data = {
-            "scale": 3,
-            "version": 1,
+            "surfaces_to_triggers": '{"4715":["instagram_feed_header"],"5858":["instagram_feed_tool_tip"],"5734":["instagram_feed_prompt"]}',  # noqa
+            "surfaces_to_queries": '{"4715":"Query+QuickPromotionSurfaceQuery:+Viewer+{viewer()+{eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true)+{edges+{client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range+{start,end},node+{id,promotion_id,logging_data,max_impressions,triggers,contextual_filters+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template+{name,parameters+{name,required,bool_value,string_value,color_value,}},creatives+{title+{text},content+{text},footer+{text},social_context+{text},social_context_images,primary_action{title+{text},url,limit,dismiss_promotion},secondary_action{title+{text},url,limit,dismiss_promotion},dismiss_action{title+{text},url,limit,dismiss_promotion},image.scale(<scale>)+{uri,width,height}}}}}}}","5858":"Query+QuickPromotionSurfaceQuery:+Viewer+{viewer()+{eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true)+{edges+{client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range+{start,end},node+{id,promotion_id,logging_data,max_impressions,triggers,contextual_filters+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template+{name,parameters+{name,required,bool_value,string_value,color_value,}},creatives+{title+{text},content+{text},footer+{text},social_context+{text},social_context_images,primary_action{title+{text},url,limit,dismiss_promotion},secondary_action{title+{text},url,limit,dismiss_promotion},dismiss_action{title+{text},url,limit,dismiss_promotion},image.scale(<scale>)+{uri,width,height}}}}}}}","5734":"Query+QuickPromotionSurfaceQuery:+Viewer+{viewer()+{eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true)+{edges+{client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range+{start,end},node+{id,promotion_id,logging_data,max_impressions,triggers,contextual_filters+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}},clauses+{clause_type,filters+{filter_type,unknown_action,value+{name,required,bool_value,int_value,string_value},extra_datas+{name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template+{name,parameters+{name,required,bool_value,string_value,color_value,}},creatives+{title+{text},content+{text},footer+{text},social_context+{text},social_context_images,primary_action{title+{text},url,limit,dismiss_promotion},secondary_action{title+{text},url,limit,dismiss_promotion},dismiss_action{title+{text},url,limit,dismiss_promotion},image.scale(<scale>)+{uri,width,height}}}}}}}"}',
             "vc_policy": "default",
-            "surfaces_to_triggers": '{"5734":["instagram_feed_prompt"],"4715":["instagram_feed_header"],"5858":["instagram_feed_tool_tip"]}',
-            "surfaces_to_queries": '{"5734":"viewer() {eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true) {edges {client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range {start,end},node {id,promotion_id,logging_data,max_impressions,triggers,contextual_filters {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template {name,parameters {name,required,bool_value,string_value,color_value,}},creatives {title {text},content {text},footer {text},social_context {text},social_context_images,primary_action{title {text},url,limit,dismiss_promotion},secondary_action{title {text},url,limit,dismiss_promotion},dismiss_action{title {text},url,limit,dismiss_promotion},image.scale(<scale>) {uri,width,height}}}}}}","4715":"viewer() {eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true) {edges {client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range {start,end},node {id,promotion_id,logging_data,max_impressions,triggers,contextual_filters {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template {name,parameters {name,required,bool_value,string_value,color_value,}},creatives {title {text},content {text},footer {text},social_context {text},social_context_images,primary_action{title {text},url,limit,dismiss_promotion},secondary_action{title {text},url,limit,dismiss_promotion},dismiss_action{title {text},url,limit,dismiss_promotion},image.scale(<scale>) {uri,width,height}}}}}}","5858":"viewer() {eligible_promotions.trigger_context_v2(<trigger_context_v2>).ig_parameters(<ig_parameters>).trigger_name(<trigger_name>).surface_nux_id(<surface>).external_gating_permitted_qps(<external_gating_permitted_qps>).supports_client_filters(true).include_holdouts(true) {edges {client_ttl_seconds,log_eligibility_waterfall,is_holdout,priority,time_range {start,end},node {id,promotion_id,logging_data,max_impressions,triggers,contextual_filters {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}},clauses {clause_type,filters {filter_type,unknown_action,value {name,required,bool_value,int_value,string_value},extra_datas {name,required,bool_value,int_value,string_value}}}}}},is_uncancelable,template {name,parameters {name,required,bool_value,string_value,color_value,}},creatives {title {text},content {text},footer {text},social_context {text},social_context_images,primary_action{title {text},url,limit,dismiss_promotion},secondary_action{title {text},url,limit,dismiss_promotion},dismiss_action{title {text},url,limit,dismiss_promotion},image.scale(<scale>) {uri,width,height}}}}}}"}',  # Just copied from request.
+            "_csrftoken": self.token,
+            "_uid": self.user_id,
+            "_uuid": self.uuid,
+            "scale": 2,
+            "version": 1,
         }
         data = self.json_data(data)
         return self.send_request("qp/batch_fetch/", data)
 
-    def get_timeline_feed(self, options=[]):
-        headers = {"X-Ads-Opt-Out": "0", "X-DEVICE-ID": self.uuid}
+    def get_timeline_feed(self, reason=None, options=[]):
+        headers = {
+            "X-Ads-Opt-Out": "0",
+            # "X-DEVICE-ID": self.uuid,
+            # "X-CM-Bandwidth-KBPS": str(random.randint(2000, 5000)),
+            # "X-CM-Latency": str(random.randint(1, 5)),
+        }
         data = {
-            "_csrftoken": self.token,
-            "_uuid": self.uuid,
-            "is_prefetch": 0,
+            "feed_view_info": "[]",
             "phone_id": self.phone_id,
-            "device_id": self.uuid,
-            "client_session_id": self.client_session_id,
             "battery_level": random.randint(25, 100),
+            # "timezone_offset": datetime.datetime.now(pytz.timezone("CET")).strftime(
+            #    "%z"
+            # ),
+            "timezone_offset": "0",
+            "_csrftoken": self.token,
+            "device_id": self.uuid,
+            "request_id": self.uuid,
+            "_uuid": self.uuid,
             "is_charging": random.randint(0, 1),
             "will_sound_on": random.randint(0, 1),
-            "is_on_screen": True,
-            "timezone_offset": datetime.datetime.now(pytz.timezone("CET")).strftime(
-                "%z"
-            ),
+            "session_id": self.client_session_id,
+            "bloks_versioning_id": "e538d4591f238824118bfcb9528c8d005f2ea3becd947a3973c030ac971bb88e",
         }
 
         if "is_pull_to_refresh" in options:
@@ -559,10 +747,6 @@ class API(object):
         elif "is_pull_to_refresh" not in options:
             data["reason"] = "cold_start_fetch"
             data["is_pull_to_refresh"] = "0"
-
-        # unseen_posts
-        # feed_view_info
-        # seen_posts
 
         if "push_disabled" in options:
             data["push_disabled"] = "true"
@@ -593,29 +777,72 @@ class API(object):
         from_video=False,
         force_resize=False,
         options={},
+        user_tags=None,
+        is_sidecar=False
     ):
         """Upload photo to Instagram
 
         @param photo         Path to photo file (String)
         @param caption       Media description (String)
-        @param upload_id     Unique upload_id (String). When None, then generate automatically
-        @param from_video    A flag that signals whether the photo is loaded from the video or by itself (Boolean, DEPRECATED: not used)
+        @param upload_id     Unique upload_id (String). When None, then
+                             generate automatically
+        @param from_video    A flag that signals whether the photo is loaded
+                             from the video or by itself
+                             (Boolean, DEPRECATED: not used)
         @param force_resize  Force photo resize (Boolean)
-        @param options       Object with difference options, e.g. configure_timeout, rename (Dict)
-                             Designed to reduce the number of function arguments!
-                             This is the simplest request object.
+        @param options       Object with difference options, e.g.
+                             configure_timeout, rename (Dict)
+                             Designed to reduce the number of function
+                             arguments! This is the simplest request object.
+        @param user_tags     Tag other users (List)
+                             usertags = [
+                                {"user_id": user_id, "position": [x, y]}
+                             ]
+        @param is_sidecar    An album element (Boolean)
 
         @return Boolean
         """
         return upload_photo(
-            self, photo, caption, upload_id, from_video, force_resize, options
+            self, photo, caption, upload_id, from_video, force_resize, options, user_tags, is_sidecar
+        )
+
+    def upload_album(
+        self,
+        photos,
+        caption=None,
+        upload_id=None,
+        from_video=False,
+        force_resize=False,
+        options={},
+        user_tags=None
+    ):
+        """Upload album to Instagram
+
+        @param photos        List of paths to photo files (List of strings)
+        @param caption       Media description (String)
+        @param upload_id     Unique upload_id (String). When None, then
+                             generate automatically
+        @param from_video    A flag that signals whether the photo is loaded
+                             from the video or by itself
+                             (Boolean, DEPRECATED: not used)
+        @param force_resize  Force photo resize (Boolean)
+        @param options       Object with difference options, e.g.
+                             configure_timeout, rename (Dict)
+                             Designed to reduce the number of function
+                             arguments! This is the simplest request object.
+        @param user_tags
+
+        @return Boolean
+        """
+        return upload_album(
+            self, photos, caption, upload_id, from_video, force_resize, options, user_tags
         )
 
     def download_photo(self, media_id, filename, media=False, folder="photos"):
         return download_photo(self, media_id, filename, media, folder)
 
-    def configure_photo(self, upload_id, photo, caption=""):
-        return configure_photo(self, upload_id, photo, caption)
+    def configure_photo(self, upload_id, photo, caption="", user_tags=None, is_sidecar=False):
+        return configure_photo(self, upload_id, photo, caption, user_tags, is_sidecar)
 
     # ====== STORY METHODS ====== #
     def download_story(self, filename, story_url, username):
@@ -635,13 +862,17 @@ class API(object):
 
         @param video      Path to video file (String)
         @param caption    Media description (String)
-        @param upload_id  Unique upload_id (String). When None, then generate automatically
-        @param thumbnail  Path to thumbnail for video (String). When None, then thumbnail is generate automatically
-        @param options    Object with difference options, e.g. configure_timeout, rename_thumbnail, rename (Dict)
+        @param upload_id  Unique upload_id (String). When None, then
+                          generate automatically
+        @param thumbnail  Path to thumbnail for video (String). When None,
+                          then thumbnail is generate automatically
+        @param options    Object with difference options, e.g.
+                          configure_timeout, rename_thumbnail, rename (Dict)
                           Designed to reduce the number of function arguments!
                           This is the simplest request object.
 
-        @return           Object with state of uploading to Instagram (or False)
+        @return           Object with state of uploading to
+                          Instagram (or False)
         """
         return upload_video(self, video, caption, upload_id, thumbnail, options)
 
@@ -659,16 +890,20 @@ class API(object):
         caption="",
         options={},
     ):
-        """Post Configure Video (send caption, thumbnail and more else to Instagram)
+        """Post Configure Video
+        (send caption, thumbnail andmore else to Instagram)
 
-        @param upload_id  Unique upload_id (String). Received from "upload_video"
+        @param upload_id  Unique upload_id (String). Received
+                          from "upload_video"
         @param video      Path to video file (String)
-        @param thumbnail  Path to thumbnail for video (String). When None, then thumbnail is generate automatically
+        @param thumbnail  Path to thumbnail for video (String). When None,
+                          then thumbnail is generate automatically
         @param width      Width in px (Integer)
         @param height     Height in px (Integer)
         @param duration   Duration in seconds (Integer)
         @param caption    Media description (String)
-        @param options    Object with difference options, e.g. configure_timeout, rename_thumbnail, rename (Dict)
+        @param options    Object with difference options, e.g.
+                          configure_timeout, rename_thumbnail, rename (Dict)
                           Designed to reduce the number of function arguments!
                           This is the simplest request object.
         """
@@ -787,8 +1022,11 @@ class API(object):
         url = "media/{comment_id}/comment_unlike/".format(comment_id=comment_id)
         return self.send_request(url, data)
 
-    # From profile => "is_carousel_bumped_post":"false", "container_module":"feed_contextual_profile", "feed_position":"0"
-    # From home/feed => "inventory_source":"media_or_ad", "is_carousel_bumped_post":"false", "container_module":"feed_timeline", "feed_position":"0"
+    # From profile => "is_carousel_bumped_post":"false",
+    # "container_module":"feed_contextual_profile", "feed_position":"0" # noqa
+    # From home/feed => "inventory_source":"media_or_ad",
+    # "is_carousel_bumped_post":"false", "container_module":"feed_timeline",
+    # "feed_position":"0" # noqa
     def like(
         self,
         media_id,
@@ -802,13 +1040,17 @@ class API(object):
         entity_page_name=None,
         entity_page_id=None,
     ):
-
         data = self.action_data(
             {
+                "inventory_source": "media_or_ad",
                 "media_id": media_id,
+                "_csrftoken": self.token,
+                "radio_type": "wifi-none",
+                "_uid": self.user_id,
+                "_uuid": self.uuid,
+                "is_carousel_bumped_post": "false",
                 "container_module": container_module,
                 "feed_position": str(feed_position),
-                "is_carousel_bumped_post": "false",
             }
         )
         if container_module == "feed_timeline":
@@ -821,8 +1063,8 @@ class API(object):
             data.update(
                 {"entity_page_name": entity_page_name, "entity_page_id": entity_page_id}
             )
-        if double_tap is None:
-            double_tap = random.randint(0, 1)
+        # if double_tap is None:
+        double_tap = random.randint(0, 1)
         json_data = self.json_data(data)
         # TODO: comment out debug log out when done
         self.logger.debug("post data: {}".format(json_data))
@@ -874,15 +1116,19 @@ class API(object):
     def get_self_username_info(self):
         return self.get_username_info(self.user_id)
 
+    def get_news_inbox(self):
+        return self.send_request("news/inbox/")
+
     def get_recent_activity(self):
-        return self.send_request("news/inbox")
+        return self.send_request("news/inbox/?limited_activity=true&show_su=true")
 
     def get_following_recent_activity(self):
         return self.send_request("news")
 
     def get_user_tags(self, user_id):
-        url = "usertags/{user_id}/feed/?rank_token={rank_token}&ranked_content=true&"
-        url = url.format(user_id=user_id, rank_token=self.rank_token)
+        url = (
+            "usertags/{user_id}/feed/?rank_token=" "{rank_token}&ranked_content=true&"
+        ).format(user_id=user_id, rank_token=self.rank_token)
         return self.send_request(url)
 
     def get_self_user_tags(self):
@@ -913,8 +1159,11 @@ class API(object):
         return self.send_request(url.format(rank_token=self.rank_token))
 
     def get_user_feed(self, user_id, max_id="", min_timestamp=None):
-        url = "feed/user/{user_id}/?max_id={max_id}&min_timestamp={min_timestamp}&rank_token={rank_token}&ranked_content=true"
-        url = url.format(
+        url = (
+            "feed/user/{user_id}/?max_id={max_id}&min_timestamp="
+            "{min_timestamp}&rank_token={rank_token}&ranked_content=true"
+            # noqa
+        ).format(
             user_id=user_id,
             max_id=max_id,
             min_timestamp=min_timestamp,
@@ -926,19 +1175,24 @@ class API(object):
         return self.get_user_feed(self.user_id, max_id, min_timestamp)
 
     def get_hashtag_feed(self, hashtag, max_id=""):
-        url = "feed/tag/{hashtag}/?max_id={max_id}&rank_token={rank_token}&ranked_content=true&"
-        url = url.format(hashtag=hashtag, max_id=max_id, rank_token=self.rank_token)
+        url = (
+            "feed/tag/{hashtag}/?max_id={max_id}"
+            "&rank_token={rank_token}&ranked_content=true&"
+        ).format(hashtag=hashtag, max_id=max_id, rank_token=self.rank_token)
         return self.send_request(url)
 
     def get_location_feed(self, location_id, max_id=""):
-        url = "feed/location/{location_id}/?max_id={max_id}&rank_token={rank_token}&ranked_content=true&"
-        url = url.format(
-            location_id=location_id, max_id=max_id, rank_token=self.rank_token
-        )
+        url = (
+            "feed/location/{location_id}/?max_id={max_id}"
+            "&rank_token={rank_token}&ranked_content=true&"
+        ).format(location_id=location_id, max_id=max_id, rank_token=self.rank_token)
         return self.send_request(url)
 
     def get_popular_feed(self):
-        url = "feed/popular/?people_teaser_supported=1&rank_token={rank_token}&ranked_content=true&"
+        url = (
+            "feed/popular/?people_teaser_supported=1"
+            "&rank_token={rank_token}&ranked_content=true&"
+        )
         return self.send_request(url.format(rank_token=self.rank_token))
 
     def get_liked_media(self, max_id=""):
@@ -947,8 +1201,10 @@ class API(object):
 
     # ====== FRIENDSHIPS METHODS ====== #
     def get_user_followings(self, user_id, max_id=""):
-        url = "friendships/{user_id}/following/?max_id={max_id}&ig_sig_key_version={sig_key}&rank_token={rank_token}"
-        url = url.format(
+        url = (
+            "friendships/{user_id}/following/?max_id={max_id}"
+            "&ig_sig_key_version={sig_key}&rank_token={rank_token}"
+        ).format(
             user_id=user_id,
             max_id=max_id,
             sig_key=config.SIG_KEY_VERSION,
@@ -970,14 +1226,37 @@ class API(object):
         return self.followers
 
     def follow(self, user_id):
-        data = self.json_data(self.action_data({"user_id": user_id}))
-        self.logger.debug("post data: {}".format(data))
+        data = self.json_data(
+            {
+                "_csrftoken": self.token,
+                "user_id": user_id,
+                "radio_type": "wifi-none",
+                "_uid": user_id,
+                "device_id": self.device_id,
+                "_uuid": self.uuid,
+            }
+        )
+        # self.logger.debug("post data: {}".format(data))
         url = "friendships/create/{user_id}/".format(user_id=user_id)
         return self.send_request(url, data)
 
     def unfollow(self, user_id):
-        data = self.json_data({"user_id": user_id, "radio_type": "wifi-none"})
+        data = self.json_data(
+            {
+                "surface": "profile",
+                "_csrftoken": self.token,
+                "user_id": user_id,
+                "radio_type": "wifi-none",
+                "_uid": user_id,
+                "_uuid": self.uuid,
+            }
+        )
         url = "friendships/destroy/{user_id}/".format(user_id=user_id)
+        return self.send_request(url, data)
+
+    def remove_follower(self, user_id):
+        data = self.json_data({"user_id": user_id})
+        url = "friendships/remove_follower/{user_id}/".format(user_id=user_id)
         return self.send_request(url, data)
 
     def block(self, user_id):
@@ -995,6 +1274,10 @@ class API(object):
         url = "friendships/show/{user_id}/".format(user_id=user_id)
         return self.send_request(url, data)
 
+    def all_friendship(self, user_id):
+        url = "friendships/show_many"
+        return self.send_request(url)
+
     def mute_user(self, user, mute_story=False, mute_posts=False):
         data_dict = {}
         if mute_posts:
@@ -1004,6 +1287,23 @@ class API(object):
         data = self.json_data(data_dict)
         url = "friendships/mute_posts_or_story_from_follow/"
         return self.send_request(url, data)
+
+    def get_muted_friends(self, muted_content):
+        # ToDo update endpoints for posts
+        if muted_content == "stories":
+            url = "friendships/muted_reels"
+        elif muted_content == "posts":
+            raise NotImplementedError(
+                "API does not support getting friends "
+                "with muted {}".format(muted_content)
+            )
+        else:
+            raise NotImplementedError(
+                "API does not support getting friends"
+                " with muted {}".format(muted_content)
+            )
+
+        return self.send_request(url)
 
     def unmute_user(self, user, unmute_posts=False, unmute_stories=False):
         data_dict = {}
@@ -1067,7 +1367,7 @@ class API(object):
             + "."
             + urllib.parse.quote(data)
         )
-        signature = "ig_sig_key_version={sig_key}&signed_body={body}"
+        signature = "signed_body={body}&ig_sig_key_version={sig_key}"
         return signature.format(sig_key=config.SIG_KEY_VERSION, body=body)
 
     @staticmethod
@@ -1129,7 +1429,8 @@ class API(object):
             return False
         if filter_business:
             print(
-                "--> You are going to filter business accounts. This will take time! <--"
+                "--> You are going to filter business accounts. "
+                "This will take time! <--"
             )
         if to_file is not None:
             if os.path.isfile(to_file):
@@ -1168,8 +1469,10 @@ class API(object):
                             sleep_track += 1
                             if sleep_track >= 20000:
                                 sleep_time = random.uniform(120, 180)
-                                msg = "\nWaiting {:.2f} min. due to too many requests."
-                                print(msg.format(sleep_time / 60))
+                                msg = (
+                                    "\nWaiting {:.2f} min. " "due to too many requests."
+                                ).format(sleep_time / 60)
+                                print(msg)
                                 time.sleep(sleep_time)
                                 sleep_track = 0
                     if not last_json["users"] or len(result) >= total:
@@ -1298,12 +1601,16 @@ class API(object):
 
     def fb_user_search(self, query):
         url = (
-            "fbsearch/topsearch/?context=blended&query={query}&rank_token={rank_token}"
+            "fbsearch/topsearch/?context=blended&query={query}"
+            "&rank_token={rank_token}"
         )
         return self.send_request(url.format(query=query, rank_token=self.rank_token))
 
     def search_users(self, query):
-        url = "users/search/?ig_sig_key_version={sig_key}&is_typeahead=true&query={query}&rank_token={rank_token}"
+        url = (
+            "users/search/?ig_sig_key_version={sig_key}"
+            "&is_typeahead=true&query={query}&rank_token={rank_token}"
+        )
         return self.send_request(
             url.format(
                 sig_key=config.SIG_KEY_VERSION, query=query, rank_token=self.rank_token
@@ -1315,12 +1622,13 @@ class API(object):
         return self.send_request(url)
 
     def search_tags(self, query):
-        url = "tags/search/?is_typeahead=true&q={query}&rank_token={rank_token}"
+        url = "tags/search/?is_typeahead=true&q={query}" "&rank_token={rank_token}"
         return self.send_request(url.format(query=query, rank_token=self.rank_token))
 
     def search_location(self, query="", lat=None, lng=None):
         url = (
-            "fbsearch/places/?rank_token={rank_token}&query={query}&lat={lat}&lng={lng}"
+            "fbsearch/places/?rank_token={rank_token}"
+            "&query={query}&lat={lat}&lng={lng}"
         )
         url = url.format(rank_token=self.rank_token, query=query, lat=lat, lng=lng)
         return self.send_request(url)
@@ -1330,8 +1638,8 @@ class API(object):
         return self.send_request(url)
 
     def get_reels_tray_feed(
-        self, reason="pull_to_refresh"
-    ):  # reason can be = cold_start, pull_to_refresh
+        self, reason=None
+    ):  # reason can be = cold_start or pull_to_refresh
         data = {
             "supported_capabilities_new": config.SUPPORTED_CAPABILITIES,
             "reason": reason,
@@ -1341,11 +1649,44 @@ class API(object):
         data = json.dumps(data)
         return self.send_request("feed/reels_tray/", data)
 
+    def get_reels_media(self):
+        data = {
+            "supported_capabilities_new": config.SUPPORTED_CAPABILITIES,
+            "source": "feed_timeline",
+            "_csrftoken": self.token,
+            "_uuid": self.uuid,
+            "_uid": self.user_id,
+            "user_ids": self.user_id,
+        }
+        data = json.dumps(data)
+        return self.send_request("feed/reels_media/", data)
+
+    def push_register(self):
+        data = {
+            "device_type": "android_mqtt",
+            "is_main_push_channel": "true",
+            "device_sub_type": "2",
+            # TODO find out what &device_token={"k":"eyJwbiI6ImNvbS5pbnN0YWdyYW0uYW5kcm9pZCIsImRpIjoiNzhlNGMxNmQtN2YzNC00NDlkLTg4OWMtMTAwZDg5OTU0NDJhIiwiYWkiOjU2NzMxMDIwMzQxNTA1MiwiY2siOiIxNjgzNTY3Mzg0NjQyOTQifQ==","v":0,"t":"fbns-b64"} is
+            "device_token": "{'k':'eyJwbiI6ImNvbS5pbnN0YWdyYW0uYW5kcm9pZCIsImRpIjoiYmY5ZjNhOTUtMzdjMi00NjEwLTk2MDctYjk2YjI4MDc5YWU4IiwiYWkiOjU2NzMxMDIwMzQxNTA1MiwiY2siOiI5NTk0MzgzMTAyMTUzMzAifQ==','v':'0','t':'fbns-b64'}",
+            "_csrftoken": self.token,
+            "guid": self.uuid,
+            "_uuid": self.uuid,
+            "users": self.user_id,
+            "familiy_device_id": "7e5a10af-3890-4892-ad0a-4656cd301a2b",
+        }
+        data = json.dumps(data)
+        return self.send_request("push/register/", data)
+
+    def media_blocked(self):
+        url = "media/blocked/"
+        return self.send_request(url)
+
     def get_users_reel(self, user_ids):
         """
             Input: user_ids - a list of user_id
             Output: dictionary: user_id - stories data.
-            Basically, for each user output the same as after self.get_user_reel
+            Basically, for each user output the same as after
+            self.get_user_reel
         """
         url = "feed/reels_media/"
         res = self.send_request(
@@ -1358,7 +1699,8 @@ class API(object):
     def see_reels(self, reels):
         """
             Input - the list of reels jsons
-            They can be aquired by using get_users_reel() or get_user_reel() methods
+            They can be aquired by using get_users_reel()
+            or get_user_reel() methods
         """
         if not isinstance(reels, list):
             # In case of only one reel as input
@@ -1394,7 +1736,7 @@ class API(object):
         return self.send_request(url)
 
     def get_self_story_viewers(self, story_id):
-        url = "media/{}/list_reel_media_viewer/?supported_capabilities_new={}".format(
+        url = ("media/{}/list_reel_media_viewer/?supported_capabilities_new={}").format(
             story_id, config.SUPPORTED_CAPABILITIES
         )
         return self.send_request(url)
@@ -1432,14 +1774,17 @@ class API(object):
         return self.send_request(url, data)
 
     def get_media_insight(self, media_id):
-        url = "insights/media_organic_insights/{}/?ig_sig_key_version={}".format(
+        url = ("insights/media_organic_insights/{}/?ig_sig_key_version={}").format(
             media_id, config.IG_SIG_KEY
         )
         return self.send_request(url)
 
     def get_self_insight(self):
         # TODO:
-        url = "insights/account_organic_insights/?show_promotions_in_landing_page=true&first={}".format()
+        url = (
+            "insights/account_organic_insights/?"
+            "show_promotions_in_landing_page=true&first={}"
+        ).format()
         return self.send_request(url)
 
     # From profile => "module_name":"feed_contextual_profile"
@@ -1462,16 +1807,136 @@ class API(object):
     def get_loom_fetch_config(self):
         return self.send_request("loom/fetch_config/")
 
+    def get_request_country(self):
+        return self.send_request("locations/request_country/")
+
+    def get_linked_accounts(self):
+        return self.send_request("linked_accounts/get_linkage_status/")
+
     def get_profile_notice(self):
         return self.send_request("users/profile_notice/")
 
+    def get_business_branded_content(self):
+        return self.send_request(
+            "business/branded_content/should_require_professional_account/"
+        )
+
+    def get_monetization_products_eligibility_data(self):
+        return self.send_request(
+            "business/eligibility/get_monetization_products_eligibility_data/?product_types=branded_content"
+        )
+
+    def get_cooldowns(self):
+        body = self.generate_signature(config.SIG_KEY_VERSION)
+        url = ("qp/get_cooldowns/?{}").format(body)
+        return self.send_request(url)
+
+    def log_resurrect_attribution(self):
+        data = {
+            "_csrftoken": self.token,
+            "_uuid": self.uuid,
+            "_uid": self.user_id,
+        }
+        data = json.dumps(data)
+        return self.send_request("attribution/log_resurrect_attribution/", data)
+
+    def store_client_push_permissions(self):
+        data = {
+            "enabled": "true",
+            "_csrftoken": self.token,
+            "device_id": self.device_id,
+            "_uuid": self.uuid,
+        }
+        data = json.dumps(data)
+        return self.send_request("attribution/store_client_push_permissions/", data)
+
+    def process_contact_point_signals(self):
+        data = {
+            "phone_id": self.phone_id,
+            "_csrftoken": self.token,
+            "_uid": self.user_id,
+            "device_id": self.device_id,
+            "_uuid": self.uuid,
+            "google_tokens": "[]",
+        }
+        data = json.dumps(data)
+        return self.send_request("accounts/process_contact_point_signals/", data)
+
+    def write_supported_capabilities(self):
+        data = {
+            "supported_capabilities_new": config.SUPPORTED_CAPABILITIES,
+            "_csrftoken": self.token,
+            "_uid": self.user_id,
+            "_uuid": self.uuid,
+        }
+        data = json.dumps(data)
+        return self.send_request("creatives/write_supported_capabilities/", data)
+
+    def arlink_download_info(self):
+        return self.send_request("users/arlink_download_info/?version_override=2.2.1")
+
+    def get_direct_v2_inbox(self):
+        return self.send_request(
+            "direct_v2/inbox/?visual_message_return_type=unseen&thread_message_limit=10&persistentBadging=true&limit=20"
+        )
+
+    def get_direct_v2_inbox2(self):
+        return self.send_request(
+            "direct_v2/inbox/?visual_message_return_type=unseen&persistentBadging=true&limit=0"
+        )
+
+    def topical_explore(self):
+        url = (
+            "discover/topical_explore/?is_prefetch=true&omit_cover_media=true&use_sectional_payload=true&timezone_offset=0&session_id={}&include_fixed_destinations=true"
+        ).format(self.client_session_id)
+        return self.send_request(url)
+
+    def notification_badge(self):
+        data = {
+            "phone_id": self.phone_id,
+            "_csrftoken": self.token,
+            "user_ids": self.user_id,
+            "device_id": self.device_id,
+            "_uuid": self.uuid,
+        }
+        data = json.dumps(data)
+        return self.send_request("notifications/badge/", data)
+
+    def facebook_ota(self):
+        url = (
+            "facebook_ota/?fields=update{download_uri,download_uri_delta_base,version_code_delta_base,download_uri_delta,fallback_to_full_update,file_size_delta,version_code,published_date,file_size,ota_bundle_type,resources_checksum,allowed_networks,release_id}&custom_user_id=3149016955&"
+            + self.generate_signature(config.SIG_KEY_VERSION)
+            + "&version_code=200396023&version_name="
+            + config.APP_VERSION
+            + "&custom_app_id=124024574287414&custom_device_id="
+            + self.phone_id
+            + ""
+        )
+        return self.send_request(url)
+
     # ====== DIRECT METHODS ====== #
     def get_inbox_v2(self):
-        data = json.dumps({"persistentBadging": True, "use_unified_inbox": True})
+        data = json.dumps(
+            {
+                "visual_message_return_type": "unseen",
+                "persistentBadging": "True",
+                "limit": "0",
+            }
+        )
         return self.send_request("direct_v2/inbox/", data)
 
     def get_presence(self):
         return self.send_request("direct_v2/get_presence/")
+
+    def get_thread(self, thread_id, cursor_id=None):
+        data = json.dumps(
+            {"visual_message_return_type": "unseen", "seq_id": "40065", "limit": "10"}
+        )
+        if cursor_id is not None:
+            data["cursor"] = cursor_id
+        return self.send_request(
+            "direct_v2/threads/{}/".format(thread_id), json.dumps(data)
+        )
 
     def get_ranked_recipients(self, mode, show_threads, query=None):
         data = {
@@ -1482,6 +1947,13 @@ class API(object):
         if query is not None:
             data["query"] = query
         return self.send_request("direct_v2/ranked_recipients/", json.dumps(data))
+
+    def get_scores_bootstrap(self):
+        url = "scores/bootstrap/users/?surfaces={surfaces}"
+        url = url.format(
+            surfaces='["autocomplete_user_list","coefficient_besties_list_ranking","coefficient_rank_recipient_user_suggestion","coefficient_ios_section_test_bootstrap_ranking","coefficient_direct_recipients_ranking_variant_2"]'
+        )
+        return self.send_request(url)
 
     def send_direct_item(self, item_type, users, **options):
         data = {"client_context": self.generate_UUID(True), "action": "send_item"}
@@ -1534,7 +2006,9 @@ class API(object):
         return self.send_request(url, data, with_signature=False, headers=headers)
 
     def get_pending_inbox(self):
-        url = "direct_v2/pending_inbox/?persistentBadging=true&use_unified_inbox=true"
+        url = (
+            "direct_v2/pending_inbox/?persistentBadging=true" "&use_unified_inbox=true"
+        )
         return self.send_request(url)
 
     # ACCEPT button in pending request
